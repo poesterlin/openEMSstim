@@ -1,0 +1,19 @@
+name: firmware
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Host-side tests
+        run: tests/firmware/run.sh
+      - uses: arduino/setup-arduino-cli@v2
+      - name: Compile for Arduino Nano
+        run: |
+          arduino-cli core update-index
+          arduino-cli core install arduino:avr
+          arduino-cli compile --fqbn arduino:avr:nano --warnings default arduino-openEMSstim

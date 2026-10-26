@@ -28,8 +28,9 @@ class AD5252 {
 public:
 	AD5252(uint8_t address);
 	virtual ~AD5252();
-	void setPosition(uint8_t wiperIndex, uint8_t whiperPosition);
-	uint8_t getPosition(uint8_t wiperIndex);
+	// Both return false / -1 if the I2C transfer failed.
+	bool setPosition(uint8_t wiperIndex, uint8_t whiperPosition);
+	int getPosition(uint8_t wiperIndex);
 
 	void decrement(uint8_t wiperIndex);
 	void increment(uint8_t wiperIndex);

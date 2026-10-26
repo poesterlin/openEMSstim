@@ -14,7 +14,9 @@
 #include "Rn4020BTLe.h"
 #include "EMSSystem.h"
 #include "EMSChannel.h"
+#include "EMSUtil.h"
 #include "avr/pgmspace.h"
+#include "avr/wdt.h"
 
 //BT: the string below is how your EMS module will show up for other BLE devices
 #define EMS_BLUETOOTH_ID "TEST1"
@@ -27,6 +29,11 @@
 
 //USB: allows to send simplified test commands (one char each, refer to https://github.com/PedroLopes/openEMSstim) to the board via USB (by default this is inactive)
 #define USB_TEST_COMMANDS_ACTIVE 0
+
+//SAFETY: resets the board (which opens all channels) if the main loop hangs for 2 s, e.g. on a stuck I2C bus.
+//Needs a bootloader that clears the watchdog after a reset (Optiboot: Uno, Nano "new bootloader").
+//Set to 0 if your Nano uses the old bootloader, otherwise it will get stuck in a reset loop.
+#define WATCHDOG_ACTIVE 1
 
 //helper print function that handles the DEBUG_ON flag automatically
 void printer(String msg, boolean force = false) {
@@ -44,6 +51,8 @@ EMSChannel emsChannel2(6, 7, A3, &digitalPot, 3);
 EMSSystem emsSystem(2);
 
 void setup() {
+	MCUSR = 0;
+	wdt_disable();
 	Serial.begin(19200);
 	softSerial.setTimeout(100);
 	Serial.setTimeout(50);
@@ -63,11 +72,19 @@ void setup() {
 	emsSystem.addChannelToSystem(&emsChannel1);
 	emsSystem.addChannelToSystem(&emsChannel2);
 	EMSSystem::start();
+	Wire.setWireTimeout(25000, true); //never block forever on a stuck I2C bus (needs Arduino AVR core >= 1.8.3)
+	//the AD5252 restores its last wiper position on power-up: start at minimum intensity
+	if (!digitalPot.setPosition(1, POTI_STEPS_UP) || !digitalPot.setPosition(3, POTI_STEPS_UP)) {
+		printer("\tEMS: ERROR, could not reset the digital potentiometer", true);
+	}
 	printer("\tEMS: INITIALIZED");
 	printer("\tEMS: STARTED");
 	printer("SETUP DONE (LED 13 WILL BE ON)");
 	pinMode(13, OUTPUT);
 	digitalWrite(13, HIGH);
+#if WATCHDOG_ACTIVE
+	wdt_enable(WDTO_2S);
+#endif
 }
 
 String command = "";
@@ -75,12 +92,13 @@ String hexCommandString;
 const String BTLE_DISCONNECT = "Connection End";
 
 void loop() {
+	wdt_reset();
 
 	if (softSerial.available() > 0) {
 		String message = softSerial.readStringUntil('\n');
 		message.trim();
                 printer("\tBT: received command: " + String(message));
-		processMessage(message);
+		processMessage(message, false, false);
                 softSerial.flush(); //never tested
 	}
 
@@ -95,34 +113,13 @@ void loop() {
              String message = Serial.readStringUntil('\n');
              printer("\tUSB: received command: " + String(message));
              message.trim();   
-	     processMessage(message);
+	     processMessage(message, USB_TEST_COMMANDS_ACTIVE, true);
            } else if (USB_TEST_COMMANDS_ACTIVE) {
              char c = Serial.read();
              printer("\tUSB-TEST-MODE: received command: " + char(c));
 	     doCommand(c);
 	   }
           Serial.flush(); 
-	}
-}
-
-//Convert-functions for HEX-Strings "4D"->"M"
-char convertToHexCharsToOneByte(char one, char two) {
-	char byteOne = convertHexCharToByte(one);
-	char byteTwo = convertHexCharToByte(two);
-	if (byteOne != -1 && byteTwo != -1)
-		return byteOne * 16 + byteTwo;
-	else {
-		return -1;
-	}
-}
-
-char convertHexCharToByte(char hexChar) {
-	if (hexChar >= 'A' && hexChar <= 'F') {
-		return hexChar - 'A';
-	} else if (hexChar >= '0' && hexChar <= '9') {
-		return hexChar - '0';
-	} else {
-		return -1;
 	}
 }
 
@@ -138,30 +135,54 @@ const char* const string_table_outputs[] PROGMEM = {ems_channel_1_active, ems_ch
 char buffer[32];
 
 //process a command message (according to protocol, check github for that)
-void processMessage(String message) {
-  if (message.charAt(0) == 'W' && message.charAt(1) == 'V') {
+//  allowTestCommands: accept single-char test commands (see below)
+//  allowRaw: accept plain protocol commands such as "C0I100T1000G" (USB only;
+//            on BT, any line that is not "WV,..." is a status message of the module)
+void processMessage(String message, bool allowTestCommands, bool allowRaw) {
+  if (message.equals(BTLE_DISCONNECT)) {
+    printer("\tBT: Disconnected");
+    emsSystem.shutDown();
+    return;
+  }
+  switch (ems::classifyMessage(message.c_str(), message.length())) {
+  case ems::MESSAGE_HEX: {
+    //"WV,<handle>,<hex>." -> hex is between the last comma and the final '.'
     int lastIndexOfComma = message.lastIndexOf(',');
     hexCommandString = message.substring(lastIndexOfComma + 1,
     message.length() - 1);
-    command = "";
     printer("\tEMS_CMD: HEX command length: ");
     printer(String(hexCommandString.length()));
     printer(hexCommandString);
-    for (unsigned int i = 0; i < hexCommandString.length(); i = i + 2) {
-      char nextChar = convertToHexCharsToOneByte(hexCommandString.charAt(i),hexCommandString.charAt(i + 1));
-      command = command + nextChar;
+    char decoded[32];
+    if (lastIndexOfComma == -1 || !ems::decodeHex(hexCommandString.c_str(),
+        hexCommandString.length(), decoded, sizeof(decoded))) {
+      printer("\tERROR: malformed HEX command, ignored", true);
+      return;
     }
+    command = decoded;
     printer("\tEMS_CMD: Converted HEX command: ");
     printer(command);
     emsSystem.doCommand(&command);
-  } else if (message.equals(BTLE_DISCONNECT)) {
-    printer("\tBT: Disconnected");
-    emsSystem.shutDown();
+    break;
   }
-  else {
-    printer("\tCommand NON HEX:");
-    printer(message);
-    doCommand(message[0]);
+  case ems::MESSAGE_TEST_CHAR:
+    if (allowTestCommands) {
+      doCommand(message[0]);
+    } else {
+      printer("\tERROR: test commands are disabled (USB_TEST_COMMANDS_ACTIVE)");
+    }
+    break;
+  case ems::MESSAGE_RAW:
+    if (allowRaw) {
+      command = message;
+      emsSystem.doCommand(&command);
+    } else {
+      printer("\tCommand NON HEX:");
+      printer(message);
+    }
+    break;
+  default:
+    break;
   }
 }
 
@@ -170,6 +191,7 @@ void processMessage(String message) {
 // TESTING COMMANDS
 //   For quick testing (e.g., opening the optocoupler ports, etc) you can use these single-char commands (one command = one char).
 //   The cavailable commands are:
+//   An opened channel closes by itself after EMS_MAX_SIGNAL_LENGTH_MS, and the intensity never wraps around (255 + 1 stays 255).
 //     "1": toggles the channel 1 between open/closed state (when the channel is closed, the potenciometer position is reset to minimum, i.e., 255)
 //     "2": toggles the channel 1 between open/closed state (when the channel is closed, the potenciometer position is reset to minimum, i.e., 255)
 //     "q": increases EMS signal on channel 1 by decreasing the digital potenciometer wiper position (i.e., resistance lowers and more EMS is passing)
@@ -187,7 +209,9 @@ void doCommand(char c) {
       strcpy_P(buffer, (char*)pgm_read_word(&(string_table_outputs[1])));
 			printer(buffer); //"\tEMS: Channel 1 inactive"
 		} else {
+			emsChannel1.setSignalLength(EMS_MAX_SIGNAL_LENGTH_MS);
 			emsChannel1.activate();
+			emsChannel1.applySignal();
       strcpy_P(buffer, (char*)pgm_read_word(&(string_table_outputs[0])));
 			printer(buffer); //"\tEMS: Channel 1x active"
 		}
@@ -197,32 +221,43 @@ void doCommand(char c) {
       strcpy_P(buffer, (char*)pgm_read_word(&(string_table_outputs[3])));
 			printer(buffer); //"\tEMS: Channel 2 inactive"
 		} else {
+			emsChannel2.setSignalLength(EMS_MAX_SIGNAL_LENGTH_MS);
 			emsChannel2.activate();
+			emsChannel2.applySignal();
       strcpy_P(buffer, (char*)pgm_read_word(&(string_table_outputs[2])));
 			printer(buffer);  //"\tEMS: Channel 2 inactive"
 		}
 	} else if (c == 'a') {
-		digitalPot.setPosition(1, digitalPot.getPosition(1) + 1);
+		stepTestWiper(1, +1);
     strcpy_P(buffer, (char*)pgm_read_word(&(string_table_outputs[4])));
 		printer(
 				buffer + String(digitalPot.getPosition(1))); //"\tEMS: Intensity Channel 1: "
 	} else if (c == 'q') {
     strcpy_P(buffer, (char*)pgm_read_word(&(string_table_outputs[4])));
-		digitalPot.setPosition(1, digitalPot.getPosition(1) - 1);
+		stepTestWiper(1, -1);
 		printer(
 				buffer + String(digitalPot.getPosition(1))); //"\tEMS: Intensity Channel 1: "
 	} else if (c == 's') {
 		//Note that this is channel 3 on Digipot but EMS channel 2
-		digitalPot.setPosition(3, digitalPot.getPosition(3) + 1);
+		stepTestWiper(3, +1);
    strcpy_P(buffer, (char*)pgm_read_word(&(string_table_outputs[5])));
 		printer(
 				buffer + String(digitalPot.getPosition(3))); //"\tEMS: Intensity Channel 2: "
 	} else if (c == 'w') {
 		//Note that this is channel 3 on Digipot but EMS channel 2
-		digitalPot.setPosition(3, digitalPot.getPosition(3) - 1);
+		stepTestWiper(3, -1);
    strcpy_P(buffer, (char*)pgm_read_word(&(string_table_outputs[5])));
 		printer(
 				buffer + String(digitalPot.getPosition(3))); //"\tEMS: Intensity Channel 2: "
 	}
         else printer("\tERROR: SINGLE-CHAR Command Unknown");
+}
+
+//moves a wiper by one step without wrapping; on an I2C error both channels are closed
+void stepTestWiper(uint8_t wiperIndex, int delta) {
+	int position = digitalPot.getPosition(wiperIndex);
+	if (position < 0 || !digitalPot.setPosition(wiperIndex, ems::stepWiper(position, delta))) {
+		printer("\tERROR: could not set intensity (I2C), closing channels", true);
+		emsSystem.shutDown();
+	}
 }

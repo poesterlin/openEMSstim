@@ -25,6 +25,7 @@
 #include <Arduino.h>
 #include "Wire.h"
 #include "AD5252.h"
+#include "EMSUtil.h"
 
 // Individual for each device must be knew
 #define IDENT_PHRASE = "EMS-Service-BLE1"
@@ -47,7 +48,8 @@ public:
 	virtual void deactivate();
 	virtual bool isActivated();
 
-	virtual void setIntensity(int intensity);
+	virtual bool setIntensity(int intensity);
+	virtual bool restoreIntensity();
 	virtual int getIntensity();
 
 	virtual void setSignalLength(int signalLength);
@@ -65,6 +67,7 @@ private:
 	bool activated;
 	int intensity;
 	unsigned long int endTime;
+	bool timerArmed;
 	int onTimeChannel;
 
 	int maxIntensity; // Poti Value

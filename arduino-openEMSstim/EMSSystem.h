@@ -44,12 +44,13 @@ protected:
 	virtual void doActionCommand(String *command);
 	virtual void setOption(String *option);
 	virtual bool getChannelAndValue(String *option, int *channel, int *value);
-	virtual int getNextNumberOfSting(String *command, int startIndex);
+	virtual long getNextNumberOfSting(String *command, int startIndex);
 
 private:
 	EMSChannel **emsChannels;
 	int channelCount;
 	int size;
+	int lastChannel; // channel of the last action command, -1 if none
 	bool isInRange(int channel);
 };
 

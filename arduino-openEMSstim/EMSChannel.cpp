@@ -34,7 +34,8 @@ EMSChannel::EMSChannel(uint8_t channel_to_Pads, uint8_t channel_to_Pads_2,
 	this->channel_to_Pads_2 = channel_to_Pads_2;
 	this->led_active_pin = led_active_pin;
 
-	endTime = 1;
+	endTime = 0;
+	timerArmed = false;
 	onTimeChannel = 1;
 
 	this->digitalPoti = digitalPoti;
@@ -80,6 +81,7 @@ void EMSChannel::deactivate() {
 	digitalWrite(channel_to_Pads, LOW);
 	activated = false;
 	endTime = 0;
+	timerArmed = false;
 }
 
 /* EN: Proofs if the channel is active
@@ -88,23 +90,24 @@ bool EMSChannel::isActivated() {
 	return activated;
 }
 
-/* Sets the intensity from 0-100
- *
+/* Sets the intensity from 0-100 (out-of-range values are clamped, so the
+ * calibrated maximum is never exceeded). Returns false if the digital poti
+ * could not be written; the channel must not be activated in that case.
  */
-void EMSChannel::setIntensity(int intensity) {
-	this->intensity = int(
-			((maxIntensity - minIntensity) * intensity) * 0.01f + 0.5f)
-			+ minIntensity;
-
-	if (this->intensity > POTI_STEPS_UP) {
-		this->intensity = POTI_STEPS_UP;
-	} else if (this->intensity < POTI_STEPS_DOWN) {
-		this->intensity = POTI_STEPS_DOWN;
-	}
+bool EMSChannel::setIntensity(int intensity) {
+	this->intensity = ems::intensityToLevel(intensity, minIntensity,
+			maxIntensity);
 
 	int resistorLevel = POTI_STEPS_UP - this->intensity;
 
-	digitalPoti->setPosition(wiperIndex, resistorLevel);
+	return digitalPoti->setPosition(wiperIndex, resistorLevel);
+}
+
+/* Writes the last intensity set with setIntensity() to the poti again (it is
+ * reset to minimum whenever the channel is deactivated).
+ */
+bool EMSChannel::restoreIntensity() {
+	return digitalPoti->setPosition(wiperIndex, POTI_STEPS_UP - intensity);
 }
 
 /* Return the intensity in a range of 0-100
@@ -115,7 +118,7 @@ int EMSChannel::getIntensity() {
 }
 
 void EMSChannel::setSignalLength(int signalLength) {
-	onTimeChannel = signalLength;
+	onTimeChannel = (int) ems::clamp(signalLength, 0, EMS_MAX_SIGNAL_LENGTH_MS);
 
 }
 
@@ -126,11 +129,12 @@ int EMSChannel::getSignalLength() {
 
 void EMSChannel::applySignal() {
 	endTime = millis() + onTimeChannel;
+	timerArmed = true;
 }
 
 
 int EMSChannel::check() {
-	if (endTime && endTime <= millis()) {
+	if (timerArmed && ems::deadlineReached(millis(), endTime)) {
 		deactivate();
 		return 1;
 	}
@@ -139,12 +143,12 @@ int EMSChannel::check() {
 
 //maxIntensity in percent
 void EMSChannel::setMaxIntensity(int maxIntensity) {
-	this->maxIntensity = int(POTI_STEPS_UP * maxIntensity * 0.01f + 0.5f);
+	this->maxIntensity = ems::percentToLevel(maxIntensity);
 }
 
 //minIntensity in percent
 void EMSChannel::setMinIntensity(int minIntensity) {
-	this->minIntensity = int(POTI_STEPS_UP * minIntensity * 0.01f + 0.5f);
+	this->minIntensity = ems::percentToLevel(minIntensity);
 }
 
 //---------- private ----------------------------------------------------
